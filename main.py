@@ -41,76 +41,160 @@ for i in range(0, len(clean), seq_length):
     all_inputs.append([ch2i[c] for c in ask])
     all_targets.append([ch2i[c] for c in ans])
 
-# print("Кусков всего:", len(all_inputs))
 
 # Размер памяти модели (128 чисел)
 hidden_size = 128
 
-# матрица (128, 74)  буква → память
+
+def forward(inputs, targets):
+    # вектор (74, 1)   текущая буква в виде нулей и одной единицы
+    h = np.zeros((hidden_size, 1))
+
+    xs = {}  # one-hot векторы на каждом шаге
+    hs = {}  # состояния памяти на каждом шаге
+    ps = {}  # вероятности на каждом шаге
+
+    hs[-1] = h  # память до начала — нули
+    loss = 0
+
+    for t in range(len(inputs)):
+        xs[t] = np.zeros((vocab_size, 1))
+        xs[t][inputs[t]] = 1
+
+        # новая память — h_prev это hs[t-1]
+        hs[t] = np.tanh(Wx @ xs[t] + Wh @ hs[t-1] + bh)
+
+        # оценки и вероятности
+        y_raw = Wy @ hs[t] + by
+        exp_y = np.exp(y_raw - np.max(y_raw))
+        ps[t] = exp_y / np.sum(exp_y)
+
+        # добавляем к loss — правильный ответ это targets[t]
+        loss += -np.log(ps[t][targets[t]][0] + 1e-8)
+
+    return loss, xs, hs, ps
+
+
+def backward(inputs, targets, xs, hs, ps):
+    # градиенты — такого же размера как сами матрицы
+    dWx = np.zeros_like(Wx)
+    dWh = np.zeros_like(Wh)
+    dWy = np.zeros_like(Wy)
+    dbh = np.zeros_like(bh)
+    dby = np.zeros_like(by)
+
+    dh_next = np.zeros((hidden_size, 1))
+
+    # идём назад — от шага 99 до шага 0
+    for t in reversed(range(len(inputs))):
+        dy = np.copy(ps[t])
+        dy[targets[t]] -= 1
+        dWy += dy @ hs[t].T
+        dby += dy
+        dh = Wy.T @ dy + dh_next
+        dh_raw = (1 - hs[t] ** 2) * dh
+        dWx += dh_raw @ xs[t].T
+        dWh += dh_raw @ hs[t - 1].T
+        dbh += dh_raw
+        dh_next = Wh.T @ dh_raw
+
+    return dWx, dWh, dWy, dbh, dby
+
+
+def train_step(inputs, targets):
+    global Wx, Wh, Wy, bh, by
+    # 1. forward
+    loss, xs, hs, ps = forward(inputs, targets)
+
+    # 2. backward
+    dWx, dWh, dWy, dbh, dby = backward(inputs, targets, xs, hs, ps)
+
+    # 3. clip градиентов
+    for dparam in [dWx, dWh, dWy, dbh, dby]:
+        np.clip(dparam, -5, 5, out=dparam)
+
+    # 4. обновить веса
+    Wx -= learning_rate * dWx
+    Wh -= learning_rate * dWh
+    Wy -= learning_rate * dWy
+    bh -= learning_rate * dbh
+    by -= learning_rate * dby
+
+    # 5. вернуть loss
+    return loss / len(inputs)
+
+
+def generate(start_char, length=300):
+    h = np.zeros((hidden_size, 1))
+    x = ch2i[start_char]
+    result = start_char
+
+    for t in range(length):
+        # 1. one-hot для x
+        x_onehot = np.zeros((vocab_size, 1))
+        x_onehot[x] = 1
+
+        # 2. обновить память
+        h = np.tanh(Wx @ x_onehot + Wh @ h + bh)
+
+        # 3. получить вероятности
+        y_raw = Wy @ h + by
+        exp_y = np.exp(y_raw - np.max(y_raw))
+        probs = exp_y / np.sum(exp_y)
+
+        # 4. выбрать следующий символ по вероятностям
+        probs_flat = probs.ravel()
+        x = np.random.choice(range(vocab_size), p=probs_flat)
+
+        # 5. добавить символ к результату
+        result += i2ch[x]
+
+    return result
+
+
 Wx = np.random.randn(hidden_size, vocab_size) * 0.01
-
-# матрица (128, 128) память → память
 Wh = np.random.randn(hidden_size, hidden_size) * 0.01
-
-# матрица (74, 128)  память → предсказание
 Wy = np.random.randn(vocab_size, hidden_size) * 0.01
-
-# вектор  (128, 1)   поправка для памяти
 bh = np.zeros((hidden_size, 1))
-
-# вектор  (74, 1)    поправка для предсказания
 by = np.zeros((vocab_size, 1))
 
+learning_rate = 0.001
+epochs = 10
 
-def forward(x, h_prev):
-    # вектор (74, 1)   текущая буква в виде нулей и одной единицы
-    x_onehot = np.zeros((vocab_size, 1))
-    x_onehot[x] = 1
-    h_new = np.tanh(Wx @ x_onehot + Wh @ h_prev + bh)
-    y_raw = Wy @ h_new + by
-    exp_y = np.exp(y_raw - np.max(y_raw))
-    probs = exp_y / np.sum(exp_y)
-    return h_new, probs
+best_loss = float('inf')
+best_weights = None
 
-# вектор (128, 1)  память ДО текущего символа
-h_prev = np.zeros((hidden_size, 1))  # память пустая — начало текста
-x = ch2i[clean[0]]                   # индекс первого символа
+# for epoch in range(epochs):
+#     total_loss = 0
+#
+#     for i in range(len(all_inputs)):
+#         loss = train_step(all_inputs[i], all_targets[i])
+#         total_loss += loss
+#
+#         if i % 500 == 0:
+#             print(f"Эпоха {epoch + 1}, шаг {i}, потеря: {loss:.4f}")
+#
+#         avg_loss = total_loss / len(all_inputs)
+#
+#         # сохраняем если лучше предыдущего
+#         if avg_loss < best_loss:
+#             best_loss = avg_loss
+#             best_weights = (Wx.copy(), Wh.copy(), Wy.copy(),
+#                             bh.copy(), by.copy())
+#     print(f"=== Эпоха {epoch + 1} завершена, средняя потеря: {total_loss / len(all_inputs):.4f} ===")
 
-# вектор (128, 1)  память ПОСЛЕ текущего символа
-# probs    — вектор (74, 1)   вероятности для каждой буквы
-h_new, probs = forward(x, h_prev)
-
-target = ch2i[clean[1]]
-# Насколько модель ошиблась
-loss = -np.log(probs[target][0])
-# print(loss)
-
-
-def compute_loss(ask_list, ans_list):
-    h = np.zeros((hidden_size, 1))  # начальная память
-    total_loss = 0
-
-    for t in range(len(ask_list)):
-        x = ask_list[t]  # текущий символ
-        target = ans_list[t]  # правильный следующий символ
-
-        h, probs = forward(x, h)
-        loss = -np.log(probs[target][0])
-        total_loss += loss
-
-    return total_loss / len(ask_list)
+Wx, Wh, Wy, bh, by = best_weights
+# print("Лучшая потеря:", best_loss)
 
 
-test_loss = compute_loss(all_inputs, all_targets)
-print("Потеря на первом куске:", test_loss)
+print("=== М ===")
+print(generate('М', 300))
 
-# Проверки
-# print(len(clean))
-# print(clean[:200])
-# print(vocab_size)
-# print(chars)
-# print(ch2i['а'])
-# print(i2ch[0])
-# print(repr(i2ch[0]))
-# print(Wx.shape, Wh.shape, Wy.shape)
-# print(bh.shape, by.shape)
+print("=== И ===")
+print(generate('и', 300))
+
+print("=== В ===")
+print(generate('В', 300))
+
+print("=== ? ===")
+print(generate('?', 300))
