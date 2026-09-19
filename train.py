@@ -33,6 +33,8 @@ for epoch in range(EPOCHS):
             best_loss = avg_loss
             best_weights = (model.get_weights_copy())
 
+    model.save_weights()
+
     print(f"Эпоха {epoch + 1} завершена, ср. потеря: {total_loss / len(all_inputs):.3f}")
 
 model.set_weights(best_weights)
